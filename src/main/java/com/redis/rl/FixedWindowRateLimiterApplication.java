@@ -35,7 +35,7 @@ public class FixedWindowRateLimiterApplication {
         .GET("/api/ping", r -> ok() //
             .contentType(TEXT_PLAIN) //
             .body(BodyInserters.fromValue("PONG")) //
-        ).filter(new RateLimiterHandlerFilterFunction()).build();
+        ).filter(new RateLimiterHandlerFilterFunction(redisTemplate)).build();
   }
 
   @Bean
@@ -59,6 +59,12 @@ public class FixedWindowRateLimiterApplication {
 }
 
 class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerResponse, ServerResponse> {
+
+  private ReactiveRedisTemplate<String, Long> redisTemplate;
+
+  public RateLimiterHandlerFilterFunction(ReactiveRedisTemplate<String, Long> redisTemplate) {
+    this.redisTemplate = redisTemplate;
+  }
 
   @Override
   public Mono<ServerResponse> filter(ServerRequest request, HandlerFunction<ServerResponse> next) {
