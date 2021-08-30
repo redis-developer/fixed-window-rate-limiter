@@ -18,11 +18,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.ReactiveRedisConnection;
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory;
 import org.springframework.data.redis.core.ReactiveRedisCallback;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.data.redis.serializer.GenericToStringSerializer;
 import org.springframework.data.redis.serializer.JdkSerializationRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
@@ -63,6 +65,10 @@ public class FixedWindowRateLimiterApplication {
   @Autowired
   private ReactiveRedisTemplate<String, Long> redisTemplate;
 
+  @Bean
+  public RedisScript<Boolean> script() {
+    return RedisScript.of(new ClassPathResource("scripts/rateLimiter.lua"), Boolean.class);
+  }
   public static void main(String[] args) {
     SpringApplication.run(FixedWindowRateLimiterApplication.class, args);
   }
