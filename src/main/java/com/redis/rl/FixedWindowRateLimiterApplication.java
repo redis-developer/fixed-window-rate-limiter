@@ -3,6 +3,10 @@ package com.redis.rl;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 import static org.springframework.web.reactive.function.server.ServerResponse.ok;
 
+import java.net.InetSocketAddress;
+import java.time.LocalTime;
+import java.util.Optional;
+
 import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.springframework.http.MediaType.TEXT_PLAIN;
@@ -68,6 +72,14 @@ class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerRe
 
   @Override
   public Mono<ServerResponse> filter(ServerRequest request, HandlerFunction<ServerResponse> next) {
+    int currentMinute = LocalTime.now().getMinute();
+    String key = String.format("rl_%s:%s", requestAddress(request.remoteAddress()), currentMinute);
+    System.out.println(">>>> key " + key);
+
     return next.handle(request);
+  }
+
+  private String requestAddress(Optional<InetSocketAddress> maybeAddress) {
+    return maybeAddress.isPresent() ? maybeAddress.get().getHostName() : "";
   }
 }
