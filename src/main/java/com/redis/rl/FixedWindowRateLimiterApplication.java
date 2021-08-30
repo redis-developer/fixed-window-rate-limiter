@@ -6,8 +6,6 @@ import static org.springframework.http.MediaType.TEXT_PLAIN;
 import static org.springframework.http.HttpStatus.TOO_MANY_REQUESTS;
 
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.time.Duration;
 import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
@@ -48,7 +46,7 @@ public class FixedWindowRateLimiterApplication {
         .GET("/api/ping", r -> ok() //
             .contentType(TEXT_PLAIN) //
             .body(BodyInserters.fromValue("PONG")) //
-        ).filter(new RateLimiterHandlerFilterFunction(redisTemplate)).build();
+        ).filter(new RateLimiterHandlerFilterFunction(redisTemplate, script(), maxRequestPerMinute)).build();
   }
 
   @Bean
@@ -69,6 +67,10 @@ public class FixedWindowRateLimiterApplication {
   public RedisScript<Boolean> script() {
     return RedisScript.of(new ClassPathResource("scripts/rateLimiter.lua"), Boolean.class);
   }
+
+  @Value("${MAX_REQUESTS_PER_MINUTE}")
+  Long maxRequestPerMinute;
+
   public static void main(String[] args) {
     SpringApplication.run(FixedWindowRateLimiterApplication.class, args);
   }
