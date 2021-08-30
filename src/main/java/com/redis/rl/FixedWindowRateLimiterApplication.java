@@ -3,18 +3,18 @@ package com.redis.rl;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 import static org.springframework.web.reactive.function.server.ServerResponse.ok;
 import static org.springframework.http.MediaType.TEXT_PLAIN;
+import static org.springframework.http.HttpStatus.TOO_MANY_REQUESTS;
 
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.time.LocalTime;
 import java.util.List;
 import java.util.Optional;
 
 import org.reactivestreams.Publisher;
 import org.springframework.beans.factory.annotation.Autowired;
-
-import static org.springframework.http.MediaType.TEXT_PLAIN;
-
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
@@ -73,6 +73,9 @@ class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerRe
 
   private ReactiveRedisTemplate<String, Long> redisTemplate;
 
+  @Value("${MAX_REQUESTS_PER_MINUTE}")
+  private static Long MAX_REQUESTS_PER_MINUTE = 20L;
+
   public RateLimiterHandlerFilterFunction(ReactiveRedisTemplate<String, Long> redisTemplate) {
     this.redisTemplate = redisTemplate;
   }
@@ -81,20 +84,28 @@ class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerRe
   public Mono<ServerResponse> filter(ServerRequest request, HandlerFunction<ServerResponse> next) {
     int currentMinute = LocalTime.now().getMinute();
     String key = String.format("rl_%s:%s", requestAddress(request.remoteAddress()), currentMinute);
-    System.out.println(">>>> key " + key);
 
-  private Mono<ServerResponse> incrAndExpireKey(String key, ServerRequest request,
-    HandlerFunction<ServerResponse> next) {
-    return redisTemplate.execute(new ReactiveRedisCallback<List<Object>>() {
-      @Override
-      public Publisher<List<Object>> doInRedis(ReactiveRedisConnection connection) throws DataAccessException {
-        ByteBuffer bbKey = ByteBuffer.wrap(key.getBytes());
-        return Mono.zip( //
-            connection.numberCommands().incr(bbKey), //
-            connection.keyCommands().expire(bbKey, Duration.ofSeconds(59L)) //
-        ).then(Mono.empty());
-      }
-    }).then(next.handle(request));
+    return redisTemplate //
+        .opsForValue().get(key) //
+        .flatMap( //
+            value -> value >= MAX_REQUESTS_PER_MINUTE ? //
+                ServerResponse.status(TOO_MANY_REQUESTS).build() : //
+                incrAndExpireKey(key, request, next) //
+        ).switchIfEmpty(incrAndExpireKey(key, request, next));
+  }
+
+    private Mono<ServerResponse> incrAndExpireKey(String key, ServerRequest request,
+      HandlerFunction<ServerResponse> next) {
+      return redisTemplate.execute(new ReactiveRedisCallback<List<Object>>() {
+        @Override
+        public Publisher<List<Object>> doInRedis(ReactiveRedisConnection connection) throws DataAccessException {
+          ByteBuffer bbKey = ByteBuffer.wrap(key.getBytes());
+          return Mono.zip( //
+              connection.numberCommands().incr(bbKey), //
+              connection.keyCommands().expire(bbKey, Duration.ofSeconds(59L)) //
+          ).then(Mono.empty());
+        }
+      }).then(next.handle(request));
   }
 
   private String requestAddress(Optional<InetSocketAddress> maybeAddress) {
