@@ -78,12 +78,14 @@ public class FixedWindowRateLimiterApplication {
 class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerResponse, ServerResponse> {
 
   private ReactiveRedisTemplate<String, Long> redisTemplate;
+  private RedisScript<Boolean> script;
+  private Long maxRequestPerMinute;
 
-  @Value("${MAX_REQUESTS_PER_MINUTE}")
-  private static Long MAX_REQUESTS_PER_MINUTE = 20L;
-
-  public RateLimiterHandlerFilterFunction(ReactiveRedisTemplate<String, Long> redisTemplate) {
+  public RateLimiterHandlerFilterFunction(ReactiveRedisTemplate<String, Long> redisTemplate,
+      RedisScript<Boolean> script, Long maxRequestPerMinute) {
     this.redisTemplate = redisTemplate;
+    this.script = script;
+    this.maxRequestPerMinute = maxRequestPerMinute;
   }
 
   @Override
@@ -92,26 +94,11 @@ class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerRe
     String key = String.format("rl_%s:%s", requestAddress(request.remoteAddress()), currentMinute);
 
     return redisTemplate //
-        .opsForValue().get(key) //
-        .flatMap( //
-            value -> value >= MAX_REQUESTS_PER_MINUTE ? //
-                ServerResponse.status(TOO_MANY_REQUESTS).build() : //
-                incrAndExpireKey(key, request, next) //
-        ).switchIfEmpty(incrAndExpireKey(key, request, next));
-  }
-
-    private Mono<ServerResponse> incrAndExpireKey(String key, ServerRequest request,
-      HandlerFunction<ServerResponse> next) {
-      return redisTemplate.execute(new ReactiveRedisCallback<List<Object>>() {
-        @Override
-        public Publisher<List<Object>> doInRedis(ReactiveRedisConnection connection) throws DataAccessException {
-          ByteBuffer bbKey = ByteBuffer.wrap(key.getBytes());
-          return Mono.zip( //
-              connection.numberCommands().incr(bbKey), //
-              connection.keyCommands().expire(bbKey, Duration.ofSeconds(59L)) //
-          ).then(Mono.empty());
-        }
-      }).then(next.handle(request));
+        .execute(script, List.of(key), List.of(maxRequestPerMinute, 59)) //
+        .single(false) //
+        .flatMap(value -> value ? //
+            ServerResponse.status(TOO_MANY_REQUESTS).build() : //
+            next.handle(request));
   }
 
   private String requestAddress(Optional<InetSocketAddress> maybeAddress) {
