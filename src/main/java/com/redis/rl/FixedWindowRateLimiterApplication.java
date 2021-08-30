@@ -2,11 +2,15 @@ package com.redis.rl;
 
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 import static org.springframework.web.reactive.function.server.ServerResponse.ok;
+import static org.springframework.http.MediaType.TEXT_PLAIN;
 
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.time.LocalTime;
+import java.util.List;
 import java.util.Optional;
 
+import org.reactivestreams.Publisher;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.springframework.http.MediaType.TEXT_PLAIN;
@@ -14,7 +18,10 @@ import static org.springframework.http.MediaType.TEXT_PLAIN;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.connection.ReactiveRedisConnection;
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory;
+import org.springframework.data.redis.core.ReactiveRedisCallback;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.data.redis.serializer.GenericToStringSerializer;
 import org.springframework.data.redis.serializer.JdkSerializationRedisSerializer;
@@ -76,7 +83,18 @@ class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerRe
     String key = String.format("rl_%s:%s", requestAddress(request.remoteAddress()), currentMinute);
     System.out.println(">>>> key " + key);
 
-    return next.handle(request);
+  private Mono<ServerResponse> incrAndExpireKey(String key, ServerRequest request,
+    HandlerFunction<ServerResponse> next) {
+    return redisTemplate.execute(new ReactiveRedisCallback<List<Object>>() {
+      @Override
+      public Publisher<List<Object>> doInRedis(ReactiveRedisConnection connection) throws DataAccessException {
+        ByteBuffer bbKey = ByteBuffer.wrap(key.getBytes());
+        return Mono.zip( //
+            connection.numberCommands().incr(bbKey), //
+            connection.keyCommands().expire(bbKey, Duration.ofSeconds(59L)) //
+        ).then(Mono.empty());
+      }
+    }).then(next.handle(request));
   }
 
   private String requestAddress(Optional<InetSocketAddress> maybeAddress) {
