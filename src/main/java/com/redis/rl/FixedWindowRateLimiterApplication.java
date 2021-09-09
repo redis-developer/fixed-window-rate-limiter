@@ -1,44 +1,48 @@
 package com.redis.rl;
 
+import static org.springframework.http.HttpStatus.TOO_MANY_REQUESTS;
+import static org.springframework.http.MediaType.TEXT_PLAIN;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 import static org.springframework.web.reactive.function.server.ServerResponse.ok;
-import static org.springframework.http.MediaType.TEXT_PLAIN;
-import static org.springframework.http.HttpStatus.TOO_MANY_REQUESTS;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.time.Duration;
+import java.nio.charset.Charset;
 import java.time.LocalTime;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
-import org.reactivestreams.Publisher;
+import javax.annotation.PostConstruct;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
-import org.springframework.dao.DataAccessException;
-import org.springframework.data.redis.connection.ReactiveRedisConnection;
-import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory;
-import org.springframework.data.redis.core.ReactiveRedisCallback;
-import org.springframework.data.redis.core.ReactiveRedisTemplate;
-import org.springframework.data.redis.serializer.GenericToStringSerializer;
-import org.springframework.data.redis.serializer.JdkSerializationRedisSerializer;
-import org.springframework.data.redis.serializer.RedisSerializationContext;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.util.StreamUtils;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.server.HandlerFilterFunction;
 import org.springframework.web.reactive.function.server.HandlerFunction;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 
-import reactor.core.publisher.Mono;
+import com.redis.lettucemod.api.StatefulRedisModulesConnection;
+import com.redis.lettucemod.api.gears.Registration;
+import com.redis.lettucemod.api.sync.RedisGearsCommands;
+import com.redis.lettucemod.output.ExecutionResults;
 
-import org.springframework.web.reactive.function.BodyInserters;
+import io.lettuce.core.RedisCommandExecutionException;
+import reactor.core.publisher.Mono;
 
 @SpringBootApplication
 public class FixedWindowRateLimiterApplication {
+
+  Logger logger = LoggerFactory.getLogger(FixedWindowRateLimiterApplication.class);
 
   @Bean
   RouterFunction<ServerResponse> routes() {
@@ -46,22 +50,42 @@ public class FixedWindowRateLimiterApplication {
         .GET("/api/ping", r -> ok() //
             .contentType(TEXT_PLAIN) //
             .body(BodyInserters.fromValue("PONG")) //
-        ).filter(new RateLimiterHandlerFilterFunction(redisTemplate)).build();
-  }
-
-  @Bean
-  ReactiveRedisTemplate<String, Long> reactiveRedisTemplate(ReactiveRedisConnectionFactory factory) {
-    JdkSerializationRedisSerializer jdkSerializationRedisSerializer = new JdkSerializationRedisSerializer();
-    StringRedisSerializer stringRedisSerializer = StringRedisSerializer.UTF_8;
-    GenericToStringSerializer<Long> longToStringSerializer = new GenericToStringSerializer<>(Long.class);
-    ReactiveRedisTemplate<String, Long> template = new ReactiveRedisTemplate<>(factory,
-        RedisSerializationContext.<String, Long>newSerializationContext(jdkSerializationRedisSerializer)
-            .key(stringRedisSerializer).value(longToStringSerializer).build());
-    return template;
+        ).filter(new RateLimiterHandlerFilterFunction(connection, maxRequestPerMinute)).build();
   }
 
   @Autowired
-  private ReactiveRedisTemplate<String, Long> redisTemplate;
+  StatefulRedisModulesConnection<String, String> connection;
+
+  @Value("${MAX_REQUESTS_PER_MINUTE}")
+  Long maxRequestPerMinute;
+
+  @PostConstruct
+  public void loadGearsScript() throws IOException {
+    String py = StreamUtils.copyToString(new ClassPathResource("scripts/rateLimiter.py").getInputStream(),
+        Charset.defaultCharset());
+    RedisGearsCommands<String, String> gears = connection.sync();
+    List<Registration> registrations = gears.dumpregistrations();
+
+    Optional<String> maybeRegistrationId = getGearsRegistrationIdForTrigger(registrations, "RateLimiter");
+    if (maybeRegistrationId.isEmpty()) {
+      try {
+        ExecutionResults er = gears.pyexecute(py);
+        if (er.isOk()) {
+          logger.info("RateLimiter.py has been registered");
+        } else if (er.isError()) {
+          logger.error(String.format("Could not register RateLimiter.py -> %s", Arrays.toString(er.getErrors().toArray())));
+        }
+      } catch (RedisCommandExecutionException rcee) {
+        logger.error(String.format("Could not register RateLimiter.py -> %s", rcee.getMessage()));
+      }
+    } else {
+      logger.info("RateLimiter.py has already been registered");
+    }
+  }
+
+  private Optional<String> getGearsRegistrationIdForTrigger(List<Registration> registrations , String trigger) {
+    return registrations.stream().filter(r -> r.getData().getArgs().get("trigger").equals("RateLimiter")).findFirst().map(Registration::getId);
+  }
 
   public static void main(String[] args) {
     SpringApplication.run(FixedWindowRateLimiterApplication.class, args);
@@ -71,13 +95,13 @@ public class FixedWindowRateLimiterApplication {
 
 class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerResponse, ServerResponse> {
 
-  private ReactiveRedisTemplate<String, Long> redisTemplate;
+  private StatefulRedisModulesConnection<String, String> connection;
+  private Long maxRequestPerMinute;
 
-  @Value("${MAX_REQUESTS_PER_MINUTE}")
-  private static Long MAX_REQUESTS_PER_MINUTE = 20L;
-
-  public RateLimiterHandlerFilterFunction(ReactiveRedisTemplate<String, Long> redisTemplate) {
-    this.redisTemplate = redisTemplate;
+  public RateLimiterHandlerFilterFunction(StatefulRedisModulesConnection<String, String> connection,
+      Long maxRequestPerMinute) {
+    this.connection = connection;
+    this.maxRequestPerMinute = maxRequestPerMinute;
   }
 
   @Override
@@ -85,27 +109,14 @@ class RateLimiterHandlerFilterFunction implements HandlerFilterFunction<ServerRe
     int currentMinute = LocalTime.now().getMinute();
     String key = String.format("rl_%s:%s", requestAddress(request.remoteAddress()), currentMinute);
 
-    return redisTemplate //
-        .opsForValue().get(key) //
-        .flatMap( //
-            value -> value >= MAX_REQUESTS_PER_MINUTE ? //
-                ServerResponse.status(TOO_MANY_REQUESTS).build() : //
-                incrAndExpireKey(key, request, next) //
-        ).switchIfEmpty(incrAndExpireKey(key, request, next));
-  }
+    RedisGearsCommands<String, String> gears = connection.sync();
 
-    private Mono<ServerResponse> incrAndExpireKey(String key, ServerRequest request,
-      HandlerFunction<ServerResponse> next) {
-      return redisTemplate.execute(new ReactiveRedisCallback<List<Object>>() {
-        @Override
-        public Publisher<List<Object>> doInRedis(ReactiveRedisConnection connection) throws DataAccessException {
-          ByteBuffer bbKey = ByteBuffer.wrap(key.getBytes());
-          return Mono.zip( //
-              connection.numberCommands().incr(bbKey), //
-              connection.keyCommands().expire(bbKey, Duration.ofSeconds(59L)) //
-          ).then(Mono.empty());
-        }
-      }).then(next.handle(request));
+    List<Object> results = gears.trigger("RateLimiter", key, Long.toString(maxRequestPerMinute), "59");
+    if (!results.isEmpty() && !Boolean.parseBoolean((String) results.get(0))) {
+      return next.handle(request);
+    } else {
+      return ServerResponse.status(TOO_MANY_REQUESTS).build();
+    }
   }
 
   private String requestAddress(Optional<InetSocketAddress> maybeAddress) {

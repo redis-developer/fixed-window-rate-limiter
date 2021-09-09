@@ -3,10 +3,11 @@ def rate_limit(key, max_requests, expiry):
   requests = int(requests) if requests else -1
   max_requests = int(max_requests)
   expiry = int(expiry)
-      
+
   if (requests == -1) or (requests < max_requests):
-    execute('INCR', key)
-    execute('EXPIRE', key, expiry)
+    with atomic():
+      execute('INCR', key)
+      execute('EXPIRE', key, expiry)
     return False
   else:
     return True
